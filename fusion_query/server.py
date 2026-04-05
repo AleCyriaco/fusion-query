@@ -111,6 +111,28 @@ class SetupRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 _connections: dict[str, FusionClient] = {}
+_tested_clients: dict[str, FusionClient] = {}  # Clients that passed /test, waiting for /connect
+
+
+def _build_client(req: ConnectRequest) -> FusionClient:
+    """Build a FusionClient from a ConnectRequest."""
+    if req.oauth2_token_url and req.oauth2_client_id:
+        auth = OAuth2Auth(
+            token_url=req.oauth2_token_url,
+            client_id=req.oauth2_client_id,
+            client_secret=req.oauth2_client_secret or "",
+        )
+    elif req.username and req.password:
+        auth = BasicAuth(req.username, req.password)
+    else:
+        raise HTTPException(400, "Provide username+password or oauth2 credentials.")
+
+    return FusionClient(
+        url=req.url,
+        auth=auth,
+        report_path=req.report_path,
+        timeout=req.timeout,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -131,28 +153,69 @@ def create_app() -> FastAPI:
     def health():
         return {"status": "ok", "connections": list(_connections.keys())}
 
+    @app.post("/test")
+    def test_connection(req: ConnectRequest):
+        """
+        Test a connection and auto-deploy the proxy report if needed.
+
+        This is the endpoint frontends should call when the user clicks
+        "Test Connection". It:
+          1. Validates credentials against the BIP server
+          2. Checks if the proxy report exists; deploys it if missing
+          3. Runs SELECT 1 FROM DUAL to verify end-to-end
+
+        The frontend flow should be:
+          1. User fills in URL + username + password
+          2. User clicks "Test Connection" → POST /test
+          3. If success: enable "Save Connection" button
+          4. User clicks "Save" → POST /connect
+        """
+        client = _build_client(req)
+        result = client.test_connection()
+
+        if result["success"]:
+            # Store temporarily so /connect can skip re-testing
+            _tested_clients[req.name] = client
+
+        return result
+
     @app.post("/connect")
     def connect(req: ConnectRequest):
-        """Create a named connection to an Oracle Fusion instance."""
-        if req.oauth2_token_url and req.oauth2_client_id:
-            auth = OAuth2Auth(
-                token_url=req.oauth2_token_url,
-                client_id=req.oauth2_client_id,
-                client_secret=req.oauth2_client_secret or "",
-            )
-        elif req.username and req.password:
-            auth = BasicAuth(req.username, req.password)
-        else:
-            raise HTTPException(400, "Provide username+password or oauth2 credentials.")
+        """
+        Save a connection. Must call POST /test first.
 
-        client = FusionClient(
-            url=req.url,
-            auth=auth,
-            report_path=req.report_path,
-            timeout=req.timeout,
-        )
+        If the connection was already tested (POST /test returned success),
+        it's saved immediately. Otherwise, test is run automatically.
+        """
+        # Use pre-tested client if available
+        if req.name in _tested_clients:
+            _connections[req.name] = _tested_clients.pop(req.name)
+            return {
+                "status": "connected",
+                "name": req.name,
+                "url": req.url,
+                "tested": True,
+            }
+
+        # No prior test — build, test, then save
+        client = _build_client(req)
+        result = client.test_connection()
+
+        if not result["success"]:
+            raise HTTPException(400, {
+                "status": "test_failed",
+                "detail": result["error"],
+                "test_result": result,
+            })
+
         _connections[req.name] = client
-        return {"status": "connected", "name": req.name, "url": req.url}
+        return {
+            "status": "connected",
+            "name": req.name,
+            "url": req.url,
+            "tested": True,
+            "proxy_was_installed": result.get("proxy_was_installed", False),
+        }
 
     @app.delete("/connect/{name}")
     def disconnect(name: str):

@@ -289,11 +289,49 @@ class FusionClient:
         self.report_path = report_path
         self.timeout = timeout
         self.verify_ssl = verify_ssl
+        self._auto_deploy = True  # Auto-deploy proxy report on first use
+        self._deploy_checked = False  # Only check once per session
 
         # Build session
         self._session = requests.Session()
         self._session.verify = verify_ssl
         self._auth.apply(self._session)
+
+    def _ensure_proxy_deployed(self) -> None:
+        """
+        Auto-deploy the proxy report if it doesn't exist.
+
+        Called automatically before the first query. Idempotent — only
+        checks once per client session. If the report already exists,
+        this is a single lightweight HTTP GET and then never runs again.
+
+        This is what makes fusion-query work with just URL + user + password,
+        with zero manual setup required.
+        """
+        if self._deploy_checked or not self._auto_deploy:
+            return
+
+        self._deploy_checked = True
+
+        from fusion_query.catalog import ensure_report_deployed
+        import logging
+
+        logger = logging.getLogger("fusion_query.client")
+
+        try:
+            ensure_report_deployed(
+                base_url=self.url,
+                session=self._session,
+                report_path=self.report_path,
+                timeout=self.timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Auto-deploy check failed (non-fatal): %s. "
+                "If queries fail, run: fusion-query setup --url %s --user <user>",
+                exc,
+                self.url,
+            )
 
     @property
     def _run_url(self) -> str:
@@ -304,17 +342,102 @@ class FusionClient:
             path = path[1:]
         return f"{self.url}/xmlpserver/services/rest/v1/reports/{path}/run"
 
-    def test_connection(self) -> bool:
+    def test_connection(self) -> dict:
         """
-        Test connectivity to Oracle Fusion BIP.
+        Test connectivity and auto-deploy the proxy report if needed.
 
-        Runs 'SELECT 1 FROM DUAL' and returns True if successful.
-        Raises on failure.
+        This is the method frontends should call when the user clicks
+        "Test Connection". It performs three steps:
+
+        1. Verifies HTTP connectivity to the BIP server
+        2. Checks if the proxy report exists; deploys it if missing
+        3. Runs 'SELECT 1 FROM DUAL' to confirm end-to-end functionality
+
+        Returns a dict with status details (for frontend display):
+            {
+                "success": True/False,
+                "connectivity": "ok" / "failed",
+                "proxy_deployed": True/False,
+                "proxy_was_installed": True/False,  # True if deployed NOW
+                "query_test": "ok" / "failed",
+                "error": None / "error message",
+            }
+
+        Frontends should:
+            - Call this when user clicks "Test Connection"
+            - Only enable "Save Connection" if success == True
+            - Show proxy_was_installed to inform user the report was deployed
         """
+        status = {
+            "success": False,
+            "connectivity": "unknown",
+            "proxy_deployed": False,
+            "proxy_was_installed": False,
+            "query_test": "unknown",
+            "error": None,
+        }
+
+        # Step 1: Test HTTP connectivity to BIP
+        try:
+            resp = self._session.get(
+                f"{self.url}/xmlpserver/services/rest/v1/catalogservice",
+                params={"objectAbsolutePath": "/"},
+                timeout=min(self.timeout, 30),
+            )
+            if resp.status_code == 401:
+                status["connectivity"] = "failed"
+                status["error"] = "Authentication failed. Check username and password."
+                return status
+            status["connectivity"] = "ok"
+        except requests.exceptions.ConnectionError:
+            status["connectivity"] = "failed"
+            status["error"] = f"Cannot connect to {self.url}. Check the URL."
+            return status
+        except requests.exceptions.Timeout:
+            status["connectivity"] = "failed"
+            status["error"] = "Connection timed out. Check the URL and network."
+            return status
+        except requests.exceptions.RequestException as exc:
+            status["connectivity"] = "failed"
+            status["error"] = f"Connection error: {exc}"
+            return status
+
+        # Step 2: Check and auto-deploy proxy report
+        from fusion_query.catalog import CatalogService
+
+        catalog = CatalogService(self.url, self._session, self.timeout)
+        already_exists = catalog.report_is_deployed(self.report_path)
+
+        if already_exists:
+            status["proxy_deployed"] = True
+            status["proxy_was_installed"] = False
+        else:
+            try:
+                deployed = catalog.deploy_report()
+                status["proxy_deployed"] = deployed
+                status["proxy_was_installed"] = deployed
+                if not deployed:
+                    status["error"] = (
+                        "Could not deploy proxy report. "
+                        "Check that the user has BI Administrator role."
+                    )
+                    return status
+            except Exception as exc:
+                status["error"] = f"Proxy report deployment failed: {exc}"
+                return status
+
+        self._deploy_checked = True  # Don't check again in query()
+
+        # Step 3: Run test query
         result = self.query("SELECT 1 AS OK FROM DUAL")
         if result.error:
-            raise ConnectionError(f"Connection test failed: {result.error}")
-        return True
+            status["query_test"] = "failed"
+            status["error"] = f"Query test failed: {result.error}"
+            return status
+
+        status["query_test"] = "ok"
+        status["success"] = True
+        return status
 
     def query(
         self,
@@ -340,6 +463,9 @@ class FusionClient:
             - Use client.fetch_next(result) to get the next page.
             - Or use client.query_all(sql) to auto-fetch all pages.
         """
+        # Auto-deploy on first query only if test_connection() was never called
+        self._ensure_proxy_deployed()
+
         page_size = min(max(1, page_size), MAX_PAGE_SIZE)
         if offset is None:
             offset = page * page_size
