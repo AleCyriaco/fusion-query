@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <defs>
+    <linearGradient id="bolt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF8C33"/>
+      <stop offset="100%" stop-color="#FF6B00"/>
+    </linearGradient>
+    <linearGradient id="db-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1A8CFF"/>
+      <stop offset="100%" stop-color="#0066CC"/>
+    </linearGradient>
+    <linearGradient id="cloud-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3399FF"/>
+      <stop offset="100%" stop-color="#0066CC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Cloud shape (background) -->
+  <path d="M98 58c0-1.1-.05-2.18-.16-3.25C95.7 38.6 81.5 26 64.5 26c-13.2 0-24.7 7.5-30.4 18.5C22.8 46.2 14 56.2 14 68c0 13.8 11.2 25 25 25h56c11 0 20-9 20-20 0-7.2-3.8-13.5-9.5-17"
+        fill="url(#cloud-grad)" opacity="0.15" stroke="url(#cloud-grad)" stroke-width="1.5"/>
+
+  <!-- Database cylinder -->
+  <ellipse cx="52" cy="42" rx="22" ry="8" fill="url(#db-grad)" opacity="0.9"/>
+  <rect x="30" y="42" width="44" height="36" fill="url(#db-grad)" opacity="0.9"/>
+  <ellipse cx="52" cy="78" rx="22" ry="8" fill="#0055AA" opacity="0.9"/>
+  <!-- Middle ring -->
+  <ellipse cx="52" cy="55" rx="22" ry="7" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.35"/>
+  <ellipse cx="52" cy="67" rx="22" ry="7" fill="none" stroke="#ffffff" stroke-width="1" opacity="0.25"/>
+
+  <!-- Lightning bolt (query speed) -->
+  <path d="M72 34 L62 58 L74 56 L58 88 L68 62 L56 64 Z"
+        fill="url(#bolt-grad)" stroke="#CC5500" stroke-width="0.5" stroke-linejoin="round"/>
+
+  <!-- Small query arrow / cursor hint -->
+  <path d="M88 44 L96 44 L96 40 L106 48 L96 56 L96 52 L88 52 Z"
+        fill="#0066CC" opacity="0.7"/>
+
+  <!-- Three small dots representing data flow -->
+  <circle cx="100" cy="64" r="2" fill="#FF6B00" opacity="0.8"/>
+  <circle cx="106" cy="58" r="1.5" fill="#FF6B00" opacity="0.6"/>
+  <circle cx="110" cy="68" r="1.5" fill="#FF6B00" opacity="0.5"/>
+</svg>

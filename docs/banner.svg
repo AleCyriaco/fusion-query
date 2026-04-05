@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 120" width="480" height="120">
+  <defs>
+    <linearGradient id="b-bolt-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF8C33"/>
+      <stop offset="100%" stop-color="#FF6B00"/>
+    </linearGradient>
+    <linearGradient id="b-db-grad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1A8CFF"/>
+      <stop offset="100%" stop-color="#0066CC"/>
+    </linearGradient>
+    <linearGradient id="b-cloud-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3399FF"/>
+      <stop offset="100%" stop-color="#0066CC"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Cloud shape (background behind icon) -->
+  <path d="M88 48c0-.9-.04-1.8-.13-2.7C86.1 32.5 74.4 22 60.4 22c-10.8 0-20.2 6.2-24.9 15.2C25.4 38.5 18.2 46.7 18.2 57c0 11.3 9.2 20.5 20.5 20.5h46c9 0 16.3-7.3 16.3-16.3 0-5.9-3.1-11.1-7.8-14"
+        fill="url(#b-cloud-grad)" opacity="0.12" stroke="url(#b-cloud-grad)" stroke-width="1.2"/>
+
+  <!-- Database cylinder -->
+  <ellipse cx="50" cy="38" rx="18" ry="6.5" fill="url(#b-db-grad)" opacity="0.9"/>
+  <rect x="32" y="38" width="36" height="30" fill="url(#b-db-grad)" opacity="0.9"/>
+  <ellipse cx="50" cy="68" rx="18" ry="6.5" fill="#0055AA" opacity="0.9"/>
+  <!-- Cylinder rings -->
+  <ellipse cx="50" cy="48" rx="18" ry="5.5" fill="none" stroke="#ffffff" stroke-width="0.8" opacity="0.35"/>
+  <ellipse cx="50" cy="58" rx="18" ry="5.5" fill="none" stroke="#ffffff" stroke-width="0.8" opacity="0.25"/>
+
+  <!-- Lightning bolt -->
+  <path d="M66 30 L58 50 L68 48.5 L54 74 L62 53 L52 54.5 Z"
+        fill="url(#b-bolt-grad)" stroke="#CC5500" stroke-width="0.4" stroke-linejoin="round"/>
+
+  <!-- Query arrow -->
+  <path d="M78 40 L84 40 L84 37 L92 43 L84 49 L84 46 L78 46 Z"
+        fill="#0066CC" opacity="0.6"/>
+
+  <!-- Data flow dots -->
+  <circle cx="90" cy="55" r="1.5" fill="#FF6B00" opacity="0.7"/>
+  <circle cx="94" cy="50" r="1.2" fill="#FF6B00" opacity="0.5"/>
+
+  <!-- "fusion" text -->
+  <text x="118" y="64" font-family="'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="300" fill="#0066CC" letter-spacing="-1">fusion</text>
+
+  <!-- Hyphen -->
+  <text x="276" y="64" font-family="'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="300" fill="#99BBDD" letter-spacing="-1">-</text>
+
+  <!-- "query" text -->
+  <text x="292" y="64" font-family="'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="38" font-weight="600" fill="#FF6B00" letter-spacing="-1">query</text>
+
+  <!-- Tagline -->
+  <text x="120" y="84" font-family="'Inter', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="11" font-weight="400" fill="#6699BB" letter-spacing="2.5">SQL ENGINE FOR ORACLE FUSION CLOUD</text>
+</svg>
