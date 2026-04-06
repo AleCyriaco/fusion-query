@@ -10,16 +10,16 @@ The proxy report consists of:
 
 The template is bundled as FusionQueryProxy.xdrz in the package.
 
-For driver implementors (Java/Rust):
-    Implement the same catalog check + upload flow:
-    1. GET /xmlpserver/services/rest/v1/catalogservice?objectAbsolutePath=...
-    2. If 404 → POST to create folder + upload report
-    3. Cache the result so you only check once per session
+Deployment strategy:
+    1. Try the user's personal folder first: /~username/FusionQuery/v1/
+       Any authenticated user can write to their own ~ folder.
+    2. Fall back to /Custom/FusionQuery/Proxy/v1/ (requires BI Administrator).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import base64
 import zipfile
 import io
@@ -37,10 +37,28 @@ logger = logging.getLogger("fusion_query.catalog")
 # Path to the bundled report template
 _TEMPLATE_PATH = Path(__file__).parent / "setup" / "FusionQueryProxy.xdrz"
 
-# Default catalog paths
+# Default catalog paths (shared folder — requires BI Administrator)
 DEFAULT_FOLDER = "/Custom/FusionQuery"
 DEFAULT_DM_PATH = "/Custom/FusionQuery/Proxy/v1/dm.xdm"
 DEFAULT_REPORT_PATH = "/Custom/FusionQuery/Proxy/v1/csv.xdo"
+
+# Original dataModel reference baked into the report template
+_ORIGINAL_DM_URL = "/~REDACTED/DataViewerTool/v1/dm.xdm"
+
+
+def _user_folder(username: str) -> str:
+    """Return the BIP personal folder path for a given username."""
+    return f"/~{username}/FusionQuery"
+
+
+def _user_report_path(username: str) -> str:
+    """Return the report path in the user's personal folder."""
+    return f"/~{username}/FusionQuery/v1/csv.xdo"
+
+
+def _user_dm_path(username: str) -> str:
+    """Return the data model path in the user's personal folder."""
+    return f"/~{username}/FusionQuery/v1/dm.xdm"
 
 
 class CatalogService:
@@ -104,7 +122,7 @@ class CatalogService:
             if resp.status_code in (200, 201, 409):  # 409 = already exists
                 logger.info("Folder created/exists: %s", folder_path)
                 return True
-            logger.warning("Failed to create folder %s: %s", folder_path, resp.text[:200])
+            logger.debug("Failed to create folder %s (HTTP %s)", folder_path, resp.status_code)
             return False
         except requests.RequestException as exc:
             logger.error("Error creating folder %s: %s", folder_path, exc)
@@ -141,11 +159,39 @@ class CatalogService:
             if resp.status_code in (200, 201):
                 logger.info("Uploaded: %s", catalog_path)
                 return True
-            logger.warning("Failed to upload %s: %s", catalog_path, resp.text[:200])
+            logger.debug("Failed to upload %s (HTTP %s)", catalog_path, resp.status_code)
             return False
         except requests.RequestException as exc:
             logger.error("Error uploading %s: %s", catalog_path, exc)
             return False
+
+    def _patch_report_xdoz(self, xdoz_bytes: bytes, new_dm_path: str) -> bytes:
+        """
+        Rewrite the dataModel URL inside csv.xdoz to point to the new dm.xdm path.
+
+        The bundled template references the original author's path. When deploying
+        to a different folder we must patch this reference so the report finds
+        its data model.
+        """
+        zf_in = zipfile.ZipFile(io.BytesIO(xdoz_bytes), "r")
+        buf = io.BytesIO()
+        zf_out = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
+
+        for entry in zf_in.namelist():
+            data = zf_in.read(entry)
+            if entry == "_report.xdo":
+                text = data.decode("utf-8")
+                # Replace any dataModel url with the new path
+                text = re.sub(
+                    r'(<dataModel\s+url=")[^"]*(")',
+                    rf"\g<1>{new_dm_path}\2",
+                    text,
+                )
+                data = text.encode("utf-8")
+            zf_out.writestr(entry, data)
+
+        zf_out.close()
+        return buf.getvalue()
 
     def deploy_report(
         self,
@@ -154,13 +200,6 @@ class CatalogService:
     ) -> bool:
         """
         Deploy the proxy report to the BIP catalog.
-
-        Extracts the FusionQueryProxy.xdrz template and uploads:
-            1. Creates /Custom/FusionQuery/ folder
-            2. Creates /Custom/FusionQuery/Proxy/ folder
-            3. Creates /Custom/FusionQuery/Proxy/v1/ folder
-            4. Uploads the Data Model (dm.xdm)
-            5. Uploads the Report (csv.xdo)
 
         Args:
             template_path:  Path to .xdrz file. Default: bundled template.
@@ -183,15 +222,13 @@ class CatalogService:
         # Create folder hierarchy
         folders = [
             target_folder,
-            f"{target_folder}/Proxy",
-            f"{target_folder}/Proxy/v1",
+            f"{target_folder}/v1",
         ]
         for folder in folders:
             self.create_folder(folder)
 
         # Extract template
         with zipfile.ZipFile(template_path, "r") as zf:
-            # Read the data model and report
             dm_content = None
             report_content = None
 
@@ -206,16 +243,20 @@ class CatalogService:
                 "Invalid template: missing dm.xdmz or csv.xdoz in the .xdrz file."
             )
 
+        # Patch the report to point to the correct data model path
+        new_dm_path = f"{target_folder}/v1/dm.xdm"
+        report_content = self._patch_report_xdoz(report_content, new_dm_path)
+
         # Upload Data Model
         dm_ok = self.upload_object(
-            f"{target_folder}/Proxy/v1/dm.xdm",
+            f"{target_folder}/v1/dm.xdm",
             dm_content,
             object_type="xdmz",
         )
 
         # Upload Report
         report_ok = self.upload_object(
-            f"{target_folder}/Proxy/v1/csv.xdo",
+            f"{target_folder}/v1/csv.xdo",
             report_content,
             object_type="xdoz",
         )
@@ -224,8 +265,18 @@ class CatalogService:
             logger.info("Proxy report deployed successfully.")
             return True
 
-        logger.error("Proxy report deployment failed.")
+        logger.debug("Proxy report deployment failed.")
         return False
+
+    def deploy_to_user_folder(self, username: str) -> bool:
+        """
+        Deploy the proxy report to the user's personal BIP folder (~username/).
+
+        Any authenticated user can write to their own personal folder
+        without BI Administrator role.
+        """
+        folder = _user_folder(username)
+        return self.deploy_report(target_folder=folder)
 
 
 def ensure_report_deployed(
@@ -233,19 +284,45 @@ def ensure_report_deployed(
     session: requests.Session,
     report_path: str = DEFAULT_REPORT_PATH,
     timeout: int = 60,
-) -> bool:
+    username: Optional[str] = None,
+) -> tuple[bool, str]:
     """
     Convenience function: check if the proxy report exists, deploy if missing.
 
-    Call this on first connection. It's idempotent — safe to call multiple times.
+    Strategy:
+        1. Check the given report_path (default: /Custom/...)
+        2. If username is provided, also check /~username/FusionQuery/v1/csv.xdo
+        3. If not found anywhere, try deploying to user's personal folder first
+        4. Fall back to /Custom/ (requires BI Administrator)
 
-    Returns True if the report is ready (already existed or was deployed).
+    Returns (deployed: bool, actual_report_path: str).
     """
     catalog = CatalogService(base_url, session, timeout)
 
+    # Check default /Custom/ path
     if catalog.report_is_deployed(report_path):
         logger.info("Proxy report already deployed at %s", report_path)
-        return True
+        return True, report_path
 
+    # Check user's personal folder
+    if username:
+        user_path = _user_report_path(username)
+        if catalog.report_is_deployed(user_path):
+            logger.info("Proxy report found in user folder at %s", user_path)
+            return True, user_path
+
+    # Not found — try deploying
     logger.info("Proxy report not found. Deploying...")
-    return catalog.deploy_report()
+
+    # Strategy 1: deploy to user's personal folder (no special permissions needed)
+    if username:
+        if catalog.deploy_to_user_folder(username):
+            user_path = _user_report_path(username)
+            logger.info("Deployed to user folder: %s", user_path)
+            return True, user_path
+
+    # Strategy 2: fall back to /Custom/ (requires BI Administrator)
+    if catalog.deploy_report():
+        return True, report_path
+
+    return False, report_path

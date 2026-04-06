@@ -151,10 +151,28 @@ def cmd_test(args):
 
     print(f"Testing connection to {args.url}...")
     try:
-        client.test_connection()
-        print("Connection successful!")
+        result = client.test_connection()
     except Exception as exc:
         print(f"Connection FAILED: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"  connectivity    : {result.get('connectivity', 'unknown')}")
+    print(f"  proxy_deployed  : {result.get('proxy_deployed', False)}")
+    print(f"  proxy_installed : {result.get('proxy_was_installed', False)}")
+    print(f"  query_test      : {result.get('query_test', 'skipped')}")
+    print(f"  query_ready     : {result.get('query_ready', False)}")
+    if result.get("error"):
+        print(f"  error           : {result['error']}", file=sys.stderr)
+    if result.get("warning"):
+        print(f"  warning         : {result['warning']}", file=sys.stderr)
+
+    if result.get("success"):
+        if result.get("query_ready"):
+            print("Connection successful! SQL queries are ready.")
+        else:
+            print("Connection successful (credentials OK). Proxy report not deployed — SQL queries unavailable.")
+    else:
+        print("Connection FAILED.", file=sys.stderr)
         sys.exit(1)
 
 

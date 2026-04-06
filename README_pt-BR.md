@@ -23,7 +23,7 @@ Execute consultas SQL arbitrarias no Oracle Fusion Cloud (ERP, HCM, SCM) usando 
 SQL → gzip → base64 → HTTP POST para BI Publisher → PL/SQL REF CURSOR → CSV → linhas parseadas
 ```
 
-O fusion-query usa a API REST do Oracle BI Publisher com um relatorio proxy leve. O relatorio contem um bloco PL/SQL que recebe o SQL comprimido, executa via REF CURSOR no banco Fusion e retorna os resultados em CSV delimitado por pipe.
+O fusion-query usa o Oracle BI Publisher com um relatorio proxy leve. O relatorio contem um bloco PL/SQL que recebe o SQL comprimido, executa via REF CURSOR no banco Fusion e retorna os resultados em CSV delimitado por pipe. Funciona com as APIs REST e SOAP, selecionando automaticamente o melhor transporte para sua instancia.
 
 ```sql
 -- PL/SQL dentro do Data Model do relatorio proxy:
@@ -61,13 +61,7 @@ pip install fusion-query[all]      # Tudo
 
 ## Inicio rapido
 
-### 1. Deploy do relatorio proxy (apenas uma vez)
-
-```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
-```
-
-### 2. Execute consultas
+### Apenas conecte e consulte — sem configuracao previa
 
 ```python
 from fusion_query import FusionClient
@@ -78,6 +72,8 @@ result = client.query("SELECT USER_NAME, EMAIL_ADDRESS FROM PER_USERS")
 for row in result.rows:
     print(row["USER_NAME"], row["EMAIL_ADDRESS"])
 ```
+
+O relatorio proxy e **implantado automaticamente** na sua pasta pessoal do BIP (`/~usuario/FusionQuery/`) no primeiro uso. Nao requer papel de Administrador BI — qualquer usuario autenticado pode comecar a consultar imediatamente.
 
 ---
 
@@ -265,26 +261,28 @@ client = FusionClient("https://...", auth=auth)
 
 ---
 
-## Setup inicial
+## Deploy do relatorio proxy
 
-O relatorio proxy precisa ser implantado uma vez por instancia Oracle Fusion.
+O relatorio proxy e **implantado automaticamente no primeiro uso** — nao requer configuracao manual.
 
-**Automatizado:**
+### Como funciona o auto-deploy
+
+1. No primeiro `query()` ou `test_connection()`, o fusion-query verifica se o relatorio proxy existe
+2. Se nao encontrado, implanta na sua **pasta pessoal do BIP** (`/~usuario/FusionQuery/v1/`)
+3. Qualquer usuario autenticado pode escrever na sua propria pasta `~/` — nao requer papel de Administrador BI
+4. Usa a API SOAP para implantacao (funciona em todas as instancias incluindo OCS)
+
+### Deploy compartilhado (opcional)
+
+Para implantar em uma pasta compartilhada acessivel por todos os usuarios:
+
 ```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
+fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user bi_admin
 ```
 
-**Via Python:**
-```python
-from fusion_query.catalog import ensure_report_deployed
-import requests
+Isso implanta em `/Custom/FusionQuery/Proxy/v1/` que requer papel de **Administrador BI** mas e compartilhado entre todos os usuarios.
 
-session = requests.Session()
-session.auth = ("admin", "senha")
-ensure_report_deployed("https://xxxx.fa.us2.oraclecloud.com", session)
-```
-
-**Implantacao manual** (se a automacao falhar por permissoes):
+### Implantacao manual (se necessario)
 
 1. Acesse o Oracle Fusion como Administrador BI
 2. Navegue ate **Relatorios e Analises > Catalogo**

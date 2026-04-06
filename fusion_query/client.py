@@ -23,6 +23,7 @@ import csv
 import gzip
 import io
 import json
+import logging
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional, Union
@@ -30,6 +31,8 @@ from typing import Any, Optional, Union
 import requests
 
 from fusion_query.auth import AuthProvider, BasicAuth
+
+logger = logging.getLogger("fusion_query.client")
 
 
 # ---------------------------------------------------------------------------
@@ -291,40 +294,39 @@ class FusionClient:
         self.verify_ssl = verify_ssl
         self._auto_deploy = True  # Auto-deploy proxy report on first use
         self._deploy_checked = False  # Only check once per session
+        self._use_soap = False  # Prefer REST, auto-switch to SOAP if REST fails
 
         # Build session
         self._session = requests.Session()
         self._session.verify = verify_ssl
         self._auth.apply(self._session)
 
+    @property
+    def _username(self) -> Optional[str]:
+        """Extract username from the auth provider (if BasicAuth)."""
+        if isinstance(self._auth, BasicAuth):
+            return self._auth.username
+        return None
+
     def _ensure_proxy_deployed(self) -> None:
         """
         Auto-deploy the proxy report if it doesn't exist.
 
         Called automatically before the first query. Idempotent — only
-        checks once per client session. If the report already exists,
-        this is a single lightweight HTTP GET and then never runs again.
+        checks once per client session.
 
-        This is what makes fusion-query work with just URL + user + password,
-        with zero manual setup required.
+        Uses the same strategy as test_connection(): SOAP-based deploy
+        to user's personal folder, works on all instances including OCS.
         """
         if self._deploy_checked or not self._auto_deploy:
             return
 
         self._deploy_checked = True
 
-        from fusion_query.catalog import ensure_report_deployed
-        import logging
-
-        logger = logging.getLogger("fusion_query.client")
-
+        # Delegate to test_connection which handles SOAP deploy
         try:
-            ensure_report_deployed(
-                base_url=self.url,
-                session=self._session,
-                report_path=self.report_path,
-                timeout=self.timeout,
-            )
+            result = self.test_connection()
+            # test_connection already sets self.report_path and self._use_soap
         except Exception as exc:
             logger.warning(
                 "Auto-deploy check failed (non-fatal): %s. "
@@ -355,40 +357,53 @@ class FusionClient:
 
         Returns a dict with status details (for frontend display):
             {
-                "success": True/False,
+                "success": True/False,      # True when connectivity + auth OK
                 "connectivity": "ok" / "failed",
                 "proxy_deployed": True/False,
                 "proxy_was_installed": True/False,  # True if deployed NOW
-                "query_test": "ok" / "failed",
+                "query_test": "ok" / "failed" / "skipped",
+                "query_ready": True/False,  # True only when full SQL pipeline works
                 "error": None / "error message",
+                "warning": None / "warning message",
             }
 
-        Frontends should:
-            - Call this when user clicks "Test Connection"
-            - Only enable "Save Connection" if success == True
-            - Show proxy_was_installed to inform user the report was deployed
+        ``success`` reflects whether credentials are valid and the server is
+        reachable — this is what frontends should use to enable "Save Connection".
+        ``query_ready`` is True only when the proxy report is deployed and a
+        test query ran successfully.  Frontends can show this as an extra
+        indicator but should NOT block saving on it.
         """
         status = {
             "success": False,
             "connectivity": "unknown",
             "proxy_deployed": False,
             "proxy_was_installed": False,
-            "query_test": "unknown",
+            "query_test": "skipped",
+            "query_ready": False,
             "error": None,
+            "warning": None,
         }
 
-        # Step 1: Test HTTP connectivity to BIP
+        # Step 1: Test connectivity via SOAP (works on all instances incl. OCS)
+        from fusion_query.soap import SOAPCatalog, SOAPReportService
+        from fusion_query.catalog import _user_report_path
+
+        username = self._username
+        password = self._auth.password if isinstance(self._auth, BasicAuth) else None
+
+        if not username or not password:
+            status["error"] = "SOAP API requires BasicAuth credentials."
+            return status
+
+        soap_catalog = SOAPCatalog(
+            self.url, self._session, username, password, self.timeout
+        )
+
+        # Test connectivity by listing root folder via SOAP
         try:
-            resp = self._session.get(
-                f"{self.url}/xmlpserver/services/rest/v1/catalogservice",
-                params={"objectAbsolutePath": "/"},
-                timeout=min(self.timeout, 30),
-            )
-            if resp.status_code == 401:
-                status["connectivity"] = "failed"
-                status["error"] = "Authentication failed. Check username and password."
-                return status
+            soap_ok = soap_catalog.object_exists("/Custom")  # lightweight check
             status["connectivity"] = "ok"
+            status["success"] = True
         except requests.exceptions.ConnectionError:
             status["connectivity"] = "failed"
             status["error"] = f"Cannot connect to {self.url}. Check the URL."
@@ -402,41 +417,91 @@ class FusionClient:
             status["error"] = f"Connection error: {exc}"
             return status
 
-        # Step 2: Check and auto-deploy proxy report
-        from fusion_query.catalog import CatalogService
+        # Step 2: Check / deploy proxy report via SOAP
+        # Check user's personal folder first, then /Custom/
+        user_path = _user_report_path(username)
+        deployed_path = None
 
-        catalog = CatalogService(self.url, self._session, self.timeout)
-        already_exists = catalog.report_is_deployed(self.report_path)
-
-        if already_exists:
-            status["proxy_deployed"] = True
-            status["proxy_was_installed"] = False
+        if soap_catalog.object_exists(user_path):
+            deployed_path = user_path
+        elif soap_catalog.object_exists(self.report_path):
+            deployed_path = self.report_path
         else:
-            try:
-                deployed = catalog.deploy_report()
-                status["proxy_deployed"] = deployed
-                status["proxy_was_installed"] = deployed
-                if not deployed:
-                    status["error"] = (
-                        "Could not deploy proxy report. "
-                        "Check that the user has BI Administrator role."
+            # Deploy to user's personal folder (no BI Admin needed)
+            from fusion_query.catalog import _user_folder, _TEMPLATE_PATH
+            import zipfile, io, re as _re, os
+
+            target = _user_folder(username)
+            template = str(_TEMPLATE_PATH)
+
+            if os.path.exists(template):
+                soap_catalog.create_folder(target)
+                soap_catalog.create_folder(f"{target}/v1")
+
+                with zipfile.ZipFile(template) as zf:
+                    dm_content = report_content = None
+                    for name in zf.namelist():
+                        if name.endswith("dm.xdmz"):
+                            dm_content = zf.read(name)
+                        elif name.endswith("csv.xdoz"):
+                            report_content = zf.read(name)
+
+                if dm_content and report_content:
+                    # Patch report to point to new DM path
+                    new_dm = f"{target}/v1/dm.xdm"
+                    zf_in = zipfile.ZipFile(io.BytesIO(report_content))
+                    buf = io.BytesIO()
+                    zf_out = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
+                    for entry in zf_in.namelist():
+                        data = zf_in.read(entry)
+                        if entry == "_report.xdo":
+                            text = data.decode("utf-8")
+                            text = _re.sub(
+                                r'(<dataModel\s+url=")[^"]*(")',
+                                rf"\g<1>{new_dm}\2",
+                                text,
+                            )
+                            data = text.encode("utf-8")
+                        zf_out.writestr(entry, data)
+                    zf_out.close()
+                    report_content = buf.getvalue()
+
+                    dm_ok = soap_catalog.upload_object(
+                        f"{target}/v1/dm.xdm", dm_content, "xdmz"
                     )
-                    return status
-            except Exception as exc:
-                status["error"] = f"Proxy report deployment failed: {exc}"
-                return status
+                    rpt_ok = soap_catalog.upload_object(
+                        f"{target}/v1/csv.xdo", report_content, "xdoz"
+                    )
+                    if dm_ok and rpt_ok:
+                        deployed_path = user_path
+                        status["proxy_was_installed"] = True
 
-        self._deploy_checked = True  # Don't check again in query()
-
-        # Step 3: Run test query
-        result = self.query("SELECT 1 AS OK FROM DUAL")
-        if result.error:
-            status["query_test"] = "failed"
-            status["error"] = f"Query test failed: {result.error}"
+        if deployed_path:
+            status["proxy_deployed"] = True
+            self.report_path = deployed_path
+            self._use_soap = True
+        else:
+            status["warning"] = "Could not deploy proxy report."
+            self._deploy_checked = True
             return status
 
-        status["query_test"] = "ok"
-        status["success"] = True
+        self._deploy_checked = True
+
+        # Step 3: Run test query via SOAP
+        try:
+            soap_report = SOAPReportService(
+                self.url, self._session, username, password, self.timeout
+            )
+            sql = "SELECT 1 AS OK FROM DUAL"
+            encoded = encode_sql(sql)
+            raw = soap_report.run_report(self.report_path, encoded)
+            status["query_test"] = "ok"
+            status["query_ready"] = True
+            self._use_soap = True
+        except Exception as exc:
+            status["query_test"] = "failed"
+            status["warning"] = f"Query test failed: {exc}"
+
         return status
 
     def query(
@@ -476,6 +541,11 @@ class FusionClient:
         # Encode and execute
         t0 = time.time()
         encoded = encode_sql(paginated_sql)
+
+        # Use SOAP if enabled (OCS instances), REST otherwise
+        if self._use_soap:
+            return self._query_soap(sql, encoded, page, page_size, offset, t0)
+
         body = _build_report_request(encoded)
 
         try:
@@ -493,6 +563,13 @@ class FusionClient:
                 error_detail = exc.response.text[:500]
             except Exception:
                 pass
+
+            # Auto-switch to SOAP on REST failure
+            if not self._use_soap and self._username:
+                logger.info("REST API failed, switching to SOAP")
+                self._use_soap = True
+                return self._query_soap(sql, encoded, page, page_size, offset, t0)
+
             return QueryResult(
                 sql=sql,
                 execution_time=elapsed,
@@ -543,6 +620,57 @@ class FusionClient:
             )
 
         # Parse CSV
+        columns, rows = _parse_csv_response(raw_csv)
+        rows_returned = len(rows)
+        has_next = rows_returned >= page_size
+
+        page_info = PageInfo(
+            page=page,
+            page_size=page_size,
+            offset=offset,
+            rows_returned=rows_returned,
+            has_next=has_next,
+            total_fetched=offset + rows_returned,
+            max_rows=None,
+            exhausted=not has_next,
+        )
+
+        return QueryResult(
+            columns=columns,
+            rows=rows,
+            page_info=page_info,
+            sql=sql,
+            execution_time=elapsed,
+        )
+
+    def _query_soap(
+        self, sql: str, encoded: str,
+        page: int, page_size: int, offset: int, t0: float,
+    ) -> QueryResult:
+        """Execute a query via SOAP ReportService (for OCS instances)."""
+        from fusion_query.soap import SOAPReportService
+
+        username = self._username
+        password = self._auth.password if isinstance(self._auth, BasicAuth) else None
+
+        try:
+            soap = SOAPReportService(
+                self.url, self._session, username, password, self.timeout
+            )
+            raw_csv = soap.run_report(self.report_path, encoded)
+        except Exception as exc:
+            elapsed = time.time() - t0
+            return QueryResult(
+                sql=sql,
+                execution_time=elapsed,
+                error=str(exc),
+                page_info=PageInfo(
+                    page=page, page_size=page_size, offset=offset,
+                    exhausted=True,
+                ),
+            )
+
+        elapsed = time.time() - t0
         columns, rows = _parse_csv_response(raw_csv)
         rows_returned = len(rows)
         has_next = rows_returned >= page_size

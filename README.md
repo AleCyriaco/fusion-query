@@ -29,7 +29,7 @@ Run arbitrary SQL queries against Oracle Fusion Cloud (ERP, HCM, SCM) databases 
 SQL → gzip → base64 → HTTP POST to BI Publisher → PL/SQL REF CURSOR → CSV → parsed rows
 ```
 
-fusion-query uses Oracle BI Publisher's REST API with a lightweight proxy report. The proxy report contains a PL/SQL block that receives compressed SQL, executes it via REF CURSOR against the Fusion database, and returns pipe-delimited CSV results.
+fusion-query uses Oracle BI Publisher with a lightweight proxy report. The proxy report contains a PL/SQL block that receives compressed SQL, executes it via REF CURSOR against the Fusion database, and returns pipe-delimited CSV results. Works with both REST and SOAP APIs, automatically selecting the best transport for your instance.
 
 ```sql
 -- PL/SQL inside the proxy report Data Model:
@@ -67,23 +67,19 @@ pip install fusion-query[all]      # Everything
 
 ## Quick start
 
-### 1. Deploy the proxy report (one-time setup)
-
-```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
-```
-
-### 2. Run queries
+### Just connect and query — no setup required
 
 ```python
 from fusion_query import FusionClient
 
 client = FusionClient("https://xxxx.fa.us2.oraclecloud.com", "user", "pass")
 
-result = client.query("SELECT USER_NAME, EMAIL_ADDRESS FROM PER_USERS")
+result = client.query("SELECT USERNAME, EMAIL_ADDRESS FROM PER_USERS")
 for row in result.rows:
-    print(row["USER_NAME"], row["EMAIL_ADDRESS"])
+    print(row["USERNAME"], row["EMAIL_ADDRESS"])
 ```
+
+The proxy report is **auto-deployed** to your personal BIP folder (`/~username/FusionQuery/`) on first use. No BI Administrator role required — any authenticated user can start querying immediately.
 
 ---
 
@@ -297,31 +293,28 @@ class MyAuth(AuthProvider):
 
 ---
 
-## First-time setup
+## Proxy report deployment
 
-The proxy report must be deployed once per Oracle Fusion instance.
+The proxy report is **auto-deployed on first use** — no manual setup required.
 
-**Automated:**
+### How auto-deploy works
+
+1. On first `query()` or `test_connection()`, fusion-query checks if the proxy report exists
+2. If not found, it deploys to your **personal BIP folder** (`/~username/FusionQuery/v1/`)
+3. Any authenticated user can write to their own `~/` folder — no BI Administrator role needed
+4. Uses SOAP API for deployment (works on all instances including OCS)
+
+### Shared deployment (optional)
+
+To deploy to a shared folder accessible by all users:
+
 ```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
+fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user bi_admin
 ```
 
-**Via Python:**
-```python
-from fusion_query.catalog import ensure_report_deployed
-import requests
+This deploys to `/Custom/FusionQuery/Proxy/v1/` which requires **BI Administrator** role but is shared across all users.
 
-session = requests.Session()
-session.auth = ("admin", "password")
-ensure_report_deployed("https://xxxx.fa.us2.oraclecloud.com", session)
-```
-
-**Via REST API:**
-```bash
-curl -X POST http://localhost:8000/setup -d '{"connection":"prod"}'
-```
-
-**Manual deployment** (if automation fails due to permissions):
+### Manual deployment (if needed)
 
 1. Log into Oracle Fusion as BI Administrator
 2. Navigate to **Reports and Analytics > Catalog**
@@ -342,21 +335,17 @@ This Python package is the **reference implementation**. The protocol is simple 
             compressed = GZIP(sql_bytes)
             encoded = BASE64(compressed)
 
-2. REQUEST  POST {url}/xmlpserver/services/rest/v1/reports/{report_path}/run
+2. REQUEST  — REST v1 (preferred):
+            POST {url}/xmlpserver/services/rest/v1/reports/{report_path}/run
             Content-Type: application/json
             Authorization: Basic base64(user:pass)
-            Body: {
-              "byPassCache": true,
-              "attributeFormat": "csv",
-              "parameterNameValues": {
-                "listOfParamNameValues": {
-                  "item": [{
-                    "name": "P_B64_CONTENT",
-                    "values": {"item": [encoded]}
-                  }]
-                }
-              }
-            }
+            Body: { "byPassCache": true, "attributeFormat": "csv",
+                    "parameterNameValues": { ... P_B64_CONTENT: encoded } }
+
+            — SOAP v2 (fallback for OCS instances):
+            POST {url}/xmlpserver/services/v2/ReportService
+            Content-Type: text/xml
+            Body: SOAP envelope with <v2:runReport> + inline credentials
 
 3. DECODE   csv_bytes = BASE64_DECODE(response.reportBytes)
             rows = PARSE_CSV(csv_bytes, delimiter='|')
@@ -364,6 +353,8 @@ This Python package is the **reference implementation**. The protocol is simple 
 4. PAGINATE Wrap SQL: SELECT * FROM ({sql}) t OFFSET n ROWS FETCH NEXT 1000 ROWS ONLY
             Repeat 1-3 until rows_returned < page_size
 ```
+
+> **Dual transport:** fusion-query tries the REST v1 API first. If it fails (common on Oracle Cloud Services instances), it automatically switches to the SOAP v2 API for the remainder of the session.
 
 ### Response schema
 
@@ -392,7 +383,8 @@ fusion_query/
   __init__.py       — Public API: FusionClient, QueryResult, PageInfo, BasicAuth, OAuth2Auth
   client.py         — Core engine: encode, request, decode, paginate
   auth.py           — AuthProvider interface + BasicAuth + OAuth2Auth
-  catalog.py        — Auto-deploy proxy report via BIP Catalog Service
+  catalog.py        — Auto-deploy proxy report via BIP Catalog REST API
+  soap.py           — SOAP v2 API client (catalog + report execution for OCS instances)
   cli.py            — CLI: query, setup, test, serve
   server.py         — REST API server (FastAPI)
   setup/

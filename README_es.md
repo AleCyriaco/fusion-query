@@ -23,7 +23,7 @@ Ejecute consultas SQL arbitrarias contra Oracle Fusion Cloud (ERP, HCM, SCM) usa
 SQL → gzip → base64 → HTTP POST a BI Publisher → PL/SQL REF CURSOR → CSV → filas parseadas
 ```
 
-fusion-query utiliza la API REST de Oracle BI Publisher con un reporte proxy ligero. El reporte contiene un bloque PL/SQL que recibe el SQL comprimido, lo ejecuta via REF CURSOR contra la base de datos Fusion y devuelve los resultados en CSV delimitado por pipe.
+fusion-query utiliza Oracle BI Publisher con un reporte proxy ligero. El reporte contiene un bloque PL/SQL que recibe el SQL comprimido, lo ejecuta via REF CURSOR contra la base de datos Fusion y devuelve los resultados en CSV delimitado por pipe. Funciona con las APIs REST y SOAP, seleccionando automaticamente el mejor transporte para su instancia.
 
 ```sql
 -- PL/SQL dentro del Data Model del reporte proxy:
@@ -61,13 +61,7 @@ pip install fusion-query[all]      # Todo
 
 ## Inicio rapido
 
-### 1. Desplegar el reporte proxy (una sola vez)
-
-```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
-```
-
-### 2. Ejecutar consultas
+### Solo conecte y consulte — sin configuracion previa
 
 ```python
 from fusion_query import FusionClient
@@ -78,6 +72,8 @@ result = client.query("SELECT USER_NAME, EMAIL_ADDRESS FROM PER_USERS")
 for row in result.rows:
     print(row["USER_NAME"], row["EMAIL_ADDRESS"])
 ```
+
+El reporte proxy se **despliega automaticamente** en su carpeta personal de BIP (`/~usuario/FusionQuery/`) en el primer uso. No requiere rol de Administrador BI — cualquier usuario autenticado puede comenzar a consultar inmediatamente.
 
 ---
 
@@ -265,26 +261,28 @@ client = FusionClient("https://...", auth=auth)
 
 ---
 
-## Configuracion inicial
+## Despliegue del reporte proxy
 
-El reporte proxy debe desplegarse una vez por instancia de Oracle Fusion.
+El reporte proxy se **despliega automaticamente en el primer uso** — no requiere configuracion manual.
 
-**Automatizado:**
+### Como funciona el auto-deploy
+
+1. En el primer `query()` o `test_connection()`, fusion-query verifica si el reporte proxy existe
+2. Si no se encuentra, lo despliega en su **carpeta personal de BIP** (`/~usuario/FusionQuery/v1/`)
+3. Cualquier usuario autenticado puede escribir en su propia carpeta `~/` — no requiere rol de Administrador BI
+4. Usa la API SOAP para el despliegue (funciona en todas las instancias incluyendo OCS)
+
+### Despliegue compartido (opcional)
+
+Para desplegar en una carpeta compartida accesible por todos los usuarios:
+
 ```bash
-fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user admin
+fusion-query setup --url https://xxxx.fa.us2.oraclecloud.com --user bi_admin
 ```
 
-**Via Python:**
-```python
-from fusion_query.catalog import ensure_report_deployed
-import requests
+Esto despliega en `/Custom/FusionQuery/Proxy/v1/` que requiere rol de **Administrador BI** pero es compartido entre todos los usuarios.
 
-session = requests.Session()
-session.auth = ("admin", "contrasena")
-ensure_report_deployed("https://xxxx.fa.us2.oraclecloud.com", session)
-```
-
-**Despliegue manual** (si la automatizacion falla por permisos):
+### Despliegue manual (si es necesario)
 
 1. Ingrese a Oracle Fusion como Administrador BI
 2. Navegue a **Reportes y Analisis > Catalogo**
