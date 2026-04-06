@@ -42,9 +42,6 @@ DEFAULT_FOLDER = "/Custom/FusionQuery"
 DEFAULT_DM_PATH = "/Custom/FusionQuery/Proxy/v1/dm.xdm"
 DEFAULT_REPORT_PATH = "/Custom/FusionQuery/Proxy/v1/csv.xdo"
 
-# Original dataModel reference baked into the report template
-_ORIGINAL_DM_URL = "/~REDACTED/DataViewerTool/v1/dm.xdm"
-
 
 def _user_folder(username: str) -> str:
     """Return the BIP personal folder path for a given username."""
